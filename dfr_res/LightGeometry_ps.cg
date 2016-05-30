@@ -1,0 +1,237 @@
+/** Deferred shading framework
+	// W.J. :wumpus: van der Laan 2005 //
+	
+	Post shader: Light geometry material
+*/
+
+#define LIGHT_POINT 		1
+#define LIGHT_SPOT			2
+#define LIGHT_DIRECTIONAL	3
+
+//////////////////////////////////////////////////////////////////////////////
+// Helper function section
+//////////////////////////////////////////////////////////////////////////////
+
+//DirectX needs this to compensate for jitter
+ps_2_x float2 fixUV(float2 texCoord, float2 texSize)
+{
+	return texCoord - (float2(0.5,0.5)/texSize);
+}
+
+float2 fixUV(float2 texCoord, float2 texSize)
+{
+	return texCoord;
+}
+
+//////////////////////////////////////////////////////////////////////////////
+// Main shader section
+//////////////////////////////////////////////////////////////////////////////	
+	
+void main(
+
+#if LIGHT_TYPE == LIGHT_DIRECTIONAL
+	float2 iUV0 : TEXCOORD0
+	, float3 iRay : TEXCOORD1
+#else
+	, float4 projPos : TEXCOORD0
+#endif
+	
+	, uniform sampler sColor0 : TEXUNIT0
+	, uniform sampler sColor1 : TEXUNIT1
+
+#if LIGHT_TYPE != LIGHT_POINT
+	, uniform float3 lightDir
+#endif
+
+#if LIGHT_TYPE == LIGHT_SPOT
+	, uniform float4 spotParams
+#endif
+
+#if LIGHT_TYPE != LIGHT_DIRECTIONAL
+	, uniform float vpWidth
+	, uniform float vpHeight
+	, uniform float3 farCorner
+	, uniform float flip
+#endif
+
+#ifdef IS_GOBO_CASTER
+	, uniform sampler2D sGoboMap : TEXUNIT2
+#endif
+
+#ifdef IS_SHADOW_CASTER
+	, uniform float4x4 invView
+	, uniform float4x4 shadowViewProjMat
+	, uniform float shadowFarClip
+	
+	#if LIGHT_TYPE == LIGHT_DIRECTIONAL	
+		, uniform float3 shadowCamPos
+	#endif
+
+	#ifdef IS_GOBO_CASTER
+		, uniform sampler2D sShadowMap : TEXUNIT3
+	#else
+		, uniform sampler2D sShadowMap : TEXUNIT2
+	#endif
+	
+#endif
+
+	, uniform float farClipDistance
+	
+	// Attributes of light
+	, uniform float4 lightDiffuseColor
+	, uniform float4 lightSpecularColor
+	
+#if LIGHT_TYPE != LIGHT_DIRECTIONAL
+	// x - light range (max distance)
+	// y - light emitter radius (like sphere area lights)
+	// z - cutoff value
+	, uniform float4 lightFalloff
+	, uniform float3 lightPos
+#endif
+	
+	, out float4 oColor0 : COLOR0
+	, out float4 oColor1 : COLOR1
+	)
+{
+
+//Non-directional lights have some calculations to do in the beginning of the pixel shader
+#if LIGHT_TYPE != LIGHT_DIRECTIONAL
+	projPos /= projPos.w;
+	// -1 is because generally +Y is down for textures but up for the screen
+    float2 texCoord = float2(projPos.x, projPos.y * -1 * flip) * 0.5 + 0.5;
+	// Texture coordinate magic, this compensates for jitter
+	texCoord = fixUV(texCoord, float2(vpWidth, vpHeight));
+	float3 iRay = float3(projPos.x, projPos.y * flip, 1) * farCorner;
+#endif
+
+
+	
+//Read GBuffer --------------
+	float4 iColor0 = tex2D(sColor0, iUV0);
+	float4 iColor1 = tex2D(sColor1, iUV0);
+	
+	float depth;
+	half3 normal;
+	half spec_int;
+	half spec_pow;
+	half matID;
+
+	readGBLight( iColor0, iColor1, depth, normal, spec_int, spec_pow, matID );
+
+	// Calculate position of texel in view space
+	float3 viewPos = normalize(iRay) * depth * farClipDistance;
+
+	
+	
+// Calculate light direction and distance --------------
+#if LIGHT_TYPE == LIGHT_DIRECTIONAL
+	float3 L = -lightDir.xyz; //shading point to light vector
+#else
+	// old L code
+	//float3 objToLightVec = lightPos - viewPos;
+	//float len_sq = dot(objToLightVec, objToLightVec);
+	//float len = sqrt(len_sq);
+	//float3 objToLightDir = objToLightVec / len;
+	
+	float3 L = lightPos - viewPos; //shading point to light vector
+	float len = length(L); //distance from shading point to emitter center
+
+	// d - distance from shading point to emitter surface
+	float d = max(0.0, len - lightFalloff.y);
+	
+	//normalize L
+	L /= len;
+#endif
+
+
+
+// Calculate diffuse colour -------------
+	float NdotL = dot(L, normal);
+	
+	//2 variants of solving NdotL negative value
+	clip(NdotL);
+	//NdotL = max(0.0, NdotL);	
+	//------------------------------------------
+	
+	float3 total_light_contrib = NdotL * lightDiffuseColor.rgb;
+	
+	
+	
+
+// Calculate attenuation ----------------
+#if LIGHT_TYPE != LIGHT_DIRECTIONAL
+	clip(lightFalloff.x - len);
+	
+	float attDenom = (d / lightFalloff.y) + 1;
+	float attenuation = 1 / (attDenom*attDenom);
+	
+	attenuation = (attenuation - lightFalloff.z) / (1 - lightFalloff.z);
+	attenuation = max(0.0, attenuation);
+	//---------------------------------------------------
+	
+	total_light_contrib *= attenuation;
+	
+		
+	//old attenuation code
+	//float attenuation = dot(lightFalloff.yzw, float3(1.0, len, len_sq));
+	//total_light_contrib /= attenuation;
+#endif
+
+
+
+//Calculate shadow and gobo ----------------
+#ifdef IS_SHADOW_CASTER || IS_GOBO_CASTER
+	float3 worldPos = mul(invView, float4(viewPos, 1)).xyz;
+	
+	#if LIGHT_TYPE == LIGHT_DIRECTIONAL
+		float len = length(shadowCamPos - worldPos);
+	#endif
+	
+	float4 shadowProjPos = mul(shadowViewProj, float4(worldPos,1));
+	shadowProjPos /= shadowProjPos.w;
+	float2 shadowSampleTexCoord = shadowProjPos.xy;
+#endif
+
+#ifdef IS_SHADOW_CASTER
+	float shadowDepth = tex2D(sShadowMap, shadowSampleTexCoord).r;
+	float shadowDistance = shadowDepth * shadowFarClip;
+	clip(shadowDistance - len + 0.1);
+#endif
+
+#ifdef IS_GOBO_CASTER
+	float4 goboSample = tex2D(sGoboMap, shadowSampleTexCoord);
+	clip(goboSample.a - 0.1);
+	total_light_contrib *= goboSample.rgb;
+#endif
+
+
+
+// Calculate specular component ------------
+#if IS_SPECULAR
+	float3 viewDir = -normalize(viewPos);
+	float3 h = normalize(viewDir + L);
+	float3 light_specular = pow(dot(normal, h), spec_pow) * lightSpecularColor.rgb;
+	float3 total_refl_contrib = spec_int * light_specular;
+#endif
+
+
+
+
+// Calculate Spot falloff ----------------
+#if LIGHT_TYPE == LIGHT_SPOT
+	float spotlightAngle = saturate(dot(lightDir.xyz, -L));
+	float spotFalloff = saturate((spotlightAngle - spotParams.x) / (spotParams.y - spotParams.x));
+	total_light_contrib *= (1.0-spotFalloff);
+#endif
+
+// Write results -----------
+	oColor0 = float4( total_light_contrib, 0 );
+	oColor1 = float4( total_refl_contrib, 0 );
+}
+
+/*
+	float3 worldPos = mul(invView, float4(viewPos, 1)).xyz; // back to world position
+	float4 texC = mul(spotVp, float4(worldPos,1)); // to spot's view-projection space
+	texC /= texC.w; 
+	float4 gobo = tex2D(Cookie, texC.xy); // got the floor projected gobo :)
+*/

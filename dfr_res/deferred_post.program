@@ -1,0 +1,26 @@
+vertex_program DFR/LightGeometry_vs cg
+{
+	source LightGeometry_vs.cg
+	profiles vs_1_1 arbvp1
+	entry_point main
+	default_params
+	{
+		param_named_auto worldViewProj worldviewproj_matrix
+		//param_named_auto invProj inverse_projection_matrix
+		//param_named_auto vpWidth viewport_width
+		//param_named_auto vpHeight viewport_height
+	}
+}
+
+vertex_program DFR/fsquad_vs cg
+{
+	source fsquad_vs.cg
+	profiles vs_1_1 arbvp1
+	entry_point main
+	default_params
+	{
+		//param_named_auto invProj inverse_projection_matrix
+		param_named_auto flip render_target_flipping
+		param_named farCorner float3 1 1 1
+	}
+}

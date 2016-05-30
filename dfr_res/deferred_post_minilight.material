@@ -1,0 +1,71 @@
+// Auxilary lights
+
+// Reference material [geometry]
+material DFR/Light/Geometry
+{
+	technique DeferredTechnique
+	{
+		pass DeferredPass
+		{
+			// Don't disable depth test, because the light doesn't have to be rendered
+			// if the bounding geometry is obscured.
+			scene_blend add
+			depth_write off
+			depth_check on
+			lighting off
+			
+			texture_unit rt0
+			{
+				content_type compositor DFR/GBuffer mrt_output 0
+				tex_address_mode clamp
+				filtering none
+			}
+			texture_unit rt1
+			{
+				content_type compositor DFR/GBuffer mrt_output 1
+				tex_address_mode clamp
+				filtering none
+			}
+		}
+	}
+}
+
+// Reference material [geometry w/shadows]
+material DFR/Light/GeometryShadow : DFR/Light/Geometry
+{
+	technique DeferredTechnique
+	{
+		pass DeferredPass
+		{
+			texture_unit ShadowMap
+			{
+				content_type shadow
+			}
+		}
+	}
+}
+
+// Reference material [quad]
+material DFR/Light/Quad : DFR/Light/Geometry
+{
+    technique DeferredTechnique
+    {
+		pass DeferredPass
+		{
+			depth_check off
+		}
+	}
+}
+
+
+// Reference material [quad w/shadows]
+material DFR/Light/QuadShadow : DFR/Light/GeometryShadow
+{
+    technique DeferredTechnique
+    {
+		pass DeferredPass
+		{
+			depth_check off
+		}
+	}
+}

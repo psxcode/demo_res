@@ -1,0 +1,551 @@
+
+
+#define GBLAYOUT_01		1
+#define GBLAYOUT_02		2
+
+#define G1CH_DEPTH				1
+#define G1CH_SPECINT			2
+#define G1CH_SPECPOW			3
+#define G3CH_DEPTH_SPECINTPOW	6
+
+#define G3CH_NO_OUTPUT		0
+#define G3CH_COLOR			1
+#define G3CH_NORMAL			2
+#define G3CH_LIGHT			3
+#define G3CH_REFLECTION		4
+#define G3CH_MOTION			5
+
+#define CH_RGB0 	0
+#define CH_R 		1
+#define CH_G 		2
+#define CH_RG		3
+#define CH_B		4
+#define CH_RB 		5
+#define CH_GB 		6
+#define CH_RGB7 	7
+#define CH_ALPHA 	8
+
+half pack_intnorm_16f(half intValue, half normValue)
+{
+	intValue = floor( intValue );
+	return intValue + clamp( normValue, 0.0h, 0.999h );
+}
+
+half2 unpack_intnorm_16f( half intNorm )
+{
+	half2 rv;
+	rv.x = floor( intNorm );
+	rv.y = intNorm - rv.x;
+	return rv;
+}
+
+half pack_2norm_16f( half norm1, half norm2 )
+{
+	norm1 *= 255.0h;
+	return pack_intnorm_16f( norm1, norm2 );
+}
+
+half2 unpack_2norm_16f( half normNorm )
+{
+	half2 rv = unpack_intnorm_16f( normNorm );
+	rv.x /= 255.0h;
+	return rv;
+}
+
+half2 pack_norm16f_2norm8( half pv )
+{
+	pv *= 256.0h;
+	half floorPV = floor(pv);
+	return half2( floorPV / 256.0h, pv - floorPV );
+}
+
+half unpack_norm16f_2norm8( half2 upv )
+{
+	const half2 mult = { 1.0h, 1.0h / 256.0h };
+	return dot( upv, mult );
+}
+
+half pack_int0255norm_norm8( half2 pv )
+{
+	pv.x = floor(pv.x / 16.0h);
+	pv.y = pv.y * 15.0h;
+	return floor(pv.x * 16.0h + pv.y) / 255.0h;
+}
+
+half2 unpack_int0255norm_norm8( half upv )
+{
+	upv *= 255.0h;
+	half2 rv;
+	rv.x = floor(upv / 16.0h) * 16.0h;
+	rv.y = (upv - rv.x) / 15.0h;
+	return rv;
+}
+
+
+half pack_2norm_norm8( half2 pv )
+{
+	pv.x *= 255.0h;
+	return pack_int0255norm_norm8( pv );
+}
+
+half2 unpack_2norm_norm8( half upv )
+{
+	half2 rv = unpack_int0255norm_norm8( upv );
+	rv.x /= 255.0h;
+	return rv;
+}
+
+half2 encode_normal( half3 n )
+{
+	half p = sqrt( n.z * 8.0h + 8.0h );
+	return half2( n.xy / p + 0.5h );
+}
+
+half3 decode_normal( half2 enc )
+{
+	half2 fenc = enc * 4.0h - 2.0h;
+	half f = dot( fenc, fenc );
+	half g = sqrt( 1.0h - f / 4.0h );
+	half3 n;
+	n.xy = fenc * g;
+	n.z = 1.0h - f / 2.0h;
+	return n;
+}
+
+static const float3 LUMINANCE_VECTOR = {0.2125f, 0.7154f, 0.0721f};
+
+// writeGB function begin --------------------
+void writeGB(
+// input params
+	float depth
+	, half3 normal
+	, half3 color
+	, half spec_int
+	, half3 light_color
+	, half3 refl_color
+	, half spec_power
+#if GBLAYOUT == GBLAYOUT_01
+	, half matID
+	, half2 motion
+#endif
+
+// output params
+	, out float4 oColor0
+	, out float4 oColor1
+	, out float4 oColor2
+	, out float4 oColor3
+)
+{
+#if GBLAYOUT == GBLAYOUT_01
+	oColor0 = float4( normal, depth );	
+	oColor1.r = pack_intnorm_16f( matID, color.r );
+	oColor1.g = pack_2norm_16f( color.g, color.b );
+	oColor1.b = pack_intnorm_16f( spec_power, spec_int );
+	oColor2 = float4( refl_color, motion.x );
+	oColor3 = float4( light_color, motion.y );
+#endif
+
+#if GBLAYOUT == GBLAYOUT_02
+	half2 encNormal = encodeNormal( normal );
+	oColor0 = float4( pack_norm16f_2norm8(encNormal.x), pack_norm16f_2norm8(encNormal.y) );
+
+	half spp_spi = pack_int0255norm_norm8( spec_power, spec_int );
+	oColor1 = float4( color, spp_spi );
+
+	half refl_lum = dot( refl_color, LUMINANCE_VECTOR );
+	half maxComponent = max( refl_lum, max( light_color.r, max( light_color.g, light_color.b ) ) );
+	half Exp = ceil( log2(maxComponent) );
+	half Intensity = exp2(Exp);
+	oColor2 = float4( pack_norm16f_2norm8(depth), refl_lum/Intensity, 0.0h );
+	oColor3 = float4( light_color/Intensity, (Exp+128.0h)/255.0h );
+#endif
+}
+//writeGB function end ---------------
+
+//readGB function begin ---------------
+void readGB (
+//input params
+		half4 iColor0
+		, half4 iColor1
+		, half4 iColor2
+		, half4 iColor3
+
+		//output params
+		, out float depth
+		, out half3 normal
+		, out half3 color
+		, out half spec_int
+		, out half3 light_color
+		, out half3 refl_color
+		, out half spec_pow
+
+	#if GBLAYOUT == GBLAYOUT_01
+		, out half matID
+		, out half2 motion
+	#endif
+
+)
+{
+#if GBLAYOUT == GBLAYOUT_01
+	//RT0
+	depth = iColor0.w;
+	normal = iColor0.xyz;
+
+	//unpacking RT1 color cells
+	half2 upkColor;
+	upkColor = unpack_intnorm_16f( iColor1.r );
+	matID = upkColor.x;
+	color.r = upkColor.y;
+
+	upkColor = unpack_2norm_16f( iColor1.g );
+	color.gb = upkColor;
+
+	upkColor = unpack_intnorm_16f( iColor1.b );
+	spec_pow = upkColor.x;
+	spec_int = upkColor.y;
+
+	//RT2 and RT3
+	motion = half2( iColor2.a, iColor3.a );
+	refl_color = iColor2.rgb;
+	light_color = iColor3.rgb;
+#endif
+
+#if GBLAYOUT == GBLAYOUT_02
+	//RT0
+	half2 encNormal = half2( unpack_norm16f_2norm8( iColor0.rg ), unpack_norm16f_2norm8( iColor0.ba ) );
+	normal = decode_normal( encNormal );
+
+	//RT1
+	color = iColor1.rgb;
+	half2 spp_spi = unpack_int0255norm_norm8( iColor1.a );
+	spec_pow = spp_spi.x;
+	spec_int = spp_spi.y;
+
+	//RT2 and RT3
+	depth = unpack_norm16f_2norm8( iColor2.rg );
+
+	half Intensity = exp2( (iColor3.a*255.0h) - 128.0h);
+	refl_color = ( iColor2.b * Intensity ).xxx;
+	light_color = iColor3.rgb * Intensity;
+#endif
+}
+//readGB function end ---------------
+
+void readGBforLight (
+	float4 iColor0
+	, float4 iColor1
+#if GBLAYOUT == GBLAYOUT_02
+	, float4 iColor2
+#endif
+	
+	, out float depth
+	, out half3 normal
+	, out half spec_int
+	, out half spec_pow
+#if GBLAYOUT == GBLAYOUT_01
+	, out half matID
+#endif
+	)
+{
+
+#if GBLAYOUT == GBLAYOUT_01
+	//RT0
+	depth = iColor0.w;
+	normal = iColor0.xyz;
+
+	//RT1 unpacking color cells
+	half2 upkColor;
+	upkColor = unpack_intnorm_16f( iColor1.r );
+	matID = upkColor.x;
+
+	upkColor = unpack_intnorm_16f( iColor1.b );
+	spec_pow = upkColor.x;
+	spec_int = upkColor.y;
+#endif
+
+#if GBLAYOUT == GBLAYOUT_02
+	//RT0
+	half2 encNormal = half2( unpack_norm16f_2norm8( iColor0.rg ), unpack_norm16f_2norm8( iColor0.ba ) );
+	normal = decode_normal( encNormal );
+
+	//RT1
+	half2 spp_spi = unpack_int0255norm_norm8( iColor1.a );
+	spec_pow = spp_spi.x;
+	spec_int = spp_spi.y;
+
+	//RT2 and RT3
+	depth = unpack_norm16f_2norm8( iColor2.rg );
+#endif
+
+}
+
+
+//------------------------------------------------------------
+float4 testQuad_fp(
+	float2 iUV0: TEXCOORD0
+	, float3 iRay: TEXCOORD1
+	
+	, uniform sampler2D sColor0: TEXUNIT0
+	, uniform sampler2D sColor1: TEXUNIT1
+	, uniform sampler2D sColor2: TEXUNIT2
+	, uniform sampler2D sColor3: TEXUNIT3
+#ifdef SEPARATE_LIGHT_REFL_TEX
+	, uniform sampler2D sColor4: TEXUNIT4
+	, uniform sampler2D sColor5: TEXUNIT5
+#endif
+	) : COLOR
+{
+	float4 iColor0 = tex2D(sColor0, iUV0);
+	float4 iColor1 = tex2D(sColor1, iUV0);
+	float4 iColor2 = tex2D(sColor2, iUV0);
+	float4 iColor3 = tex2D(sColor3, iUV0);
+	
+	float4 oColor = {0,0,0,0};
+	float depth;
+	half3 color;
+	half3 normal;
+	half spec_int;
+	half spec_pow;
+	half3 light_color;
+	half3 refl_color;
+#if GBLAYOUT == GBLAYOUT_01
+	half matId;
+	half2 motion;
+#endif
+
+readGB(
+		iColor0
+		,iColor1
+		,iColor2
+		,iColor3
+		,depth
+		,normal
+		,color
+		,spec_int
+		,light_color
+		,refl_color
+		,spec_pow 
+#if GBLAYOUT == GBLAYOUT_01
+		,matId
+		,motion
+#endif
+	);
+	
+#ifdef SEPARATE_LIGHT_REFL_TEX
+	float4 iColor4 = tex2D(sColor4, iUV0);
+	float4 iColor5 = tex2D(sColor5, iUV0);
+#endif
+	
+	return iColor4 + iColor5;
+}
+//------------------------------------------------------------
+float4 testQuadNoSamplers_fp(
+	float2 iUV0:TEXCOORD0,
+	float3 iRay:TEXCOORD1
+	) : COLOR
+{
+	return float4(iUV0, 0, 1);
+}
+//------------------------------------------------------------
+float4 compGBufferGeomDebug_fp(
+	float2 iUV0: TEXCOORD0, 
+	float3 iRay: TEXCOORD1,
+
+	uniform sampler2D sColor0: TEXUNIT0,
+	uniform sampler2D sColor1: TEXUNIT1,
+	uniform sampler2D sColor2: TEXUNIT2,
+	uniform sampler2D sColor3: TEXUNIT3,
+	
+	uniform int channel_filter,
+	uniform int gbuffer_filter,
+	uniform int quad_mode
+	) : COLOR
+{
+	if(quad_mode == 1)
+	{
+		iUV0 *= 2;
+	}
+	float4 iColor0 = tex2D(sColor0, iUV0);
+	float4 iColor1 = tex2D(sColor1, iUV0);
+	float4 iColor2 = tex2D(sColor2, iUV0);
+	float4 iColor3 = tex2D(sColor3, iUV0);
+
+	float4 oColor = {0,0,0,0};
+	float depth;
+	half3 color;
+	half3 normal;
+	half spec_int;
+	half spec_pow;
+	half3 light_color;
+	half3 refl_color;
+#if GBLAYOUT == GBLAYOUT_01
+	half matId;
+	half2 motion;
+#endif
+	
+	
+	readGB(
+		iColor0
+		,iColor1
+		,iColor2
+		,iColor3
+		,depth
+		,normal
+		,color
+		,spec_int
+		,light_color
+		,refl_color
+		,spec_pow 
+#if GBLAYOUT == GBLAYOUT_01
+		,matId
+		,motion
+#endif
+	);
+	
+	
+	int alphaChannelMode = gbuffer_filter * 0.1;
+	int colorChannelMode = gbuffer_filter - (alphaChannelMode * 10);
+	
+	if(quad_mode == 1)
+	{
+		half2 quad0 = {floor(2.0h - iUV0.x), floor(2.0h - iUV0.y)};
+		
+		half2 quad1 = {floor(iUV0.x), quad0.y};
+		
+		half2 quad2 = {quad0.x, floor(iUV0.y)};
+		
+		half2 quad3 = {quad1.x, quad2.y};
+		
+		if(colorChannelMode == G3CH_COLOR)
+		{
+			oColor.rgb = color.r * quad0.x * quad0.y
+						+ color.g * quad1.x * quad1.y
+						+ color.b * quad2.x * quad2.y;
+		}
+		else if(colorChannelMode == G3CH_NORMAL)
+		{
+			oColor.rgb = normal.r * quad0.x * quad0.y
+						+ normal.g * quad1.x * quad1.y
+						+ normal.b * quad2.x * quad2.y;
+		}
+		else if(colorChannelMode == G3CH_LIGHT)
+		{
+			oColor.rgb = light_color.r * quad0.x * quad0.y
+						+ light_color.g * quad1.x * quad1.y
+						+ light_color.b * quad2.x * quad2.y;
+		}
+		else if(colorChannelMode == G3CH_REFLECTION)
+		{
+			oColor.rgb = refl_color.r * quad0.x * quad0.y
+						+ refl_color.g * quad1.x * quad1.y
+						+ refl_color.b * quad2.x * quad2.y;
+		}
+#if GBLAYOUT == GBLAYOUT_01
+		else if(colorChannelMode == G3CH_MOTION)
+		{
+			oColor.rg = motion.r * quad0.x * quad0.y
+						+ motion.g * quad1.x * quad1.y;
+		}
+#endif
+		
+		if(alphaChannelMode == G1CH_DEPTH)
+		{
+			oColor.a = depth * quad3.x * quad3.y;
+		}
+		else if(alphaChannelMode == G1CH_SPECINT)
+		{
+			oColor.a = spec_int * quad3.x * quad3.y;
+		}
+		else if(alphaChannelMode == G1CH_SPECPOW)
+		{
+			oColor.a = spec_pow * quad3.x * quad3.y;
+		}
+		else if(alphaChannelMode == G3CH_DEPTH_SPECINTPOW)
+		{
+			oColor.rgb = depth * quad0.x * quad0.y
+						+ spec_int * quad1.x * quad1.y
+						+ spec_pow * quad2.x * quad2.y;
+		}
+		
+		return oColor;
+	}
+	else
+	{
+		if(colorChannelMode == G3CH_COLOR)
+		{
+			oColor.rgb = color;
+		}
+		else if(colorChannelMode == G3CH_NORMAL)
+		{
+			oColor.rgb = normal;
+		}
+		else if(colorChannelMode == G3CH_LIGHT)
+		{
+			oColor.rgb = light_color;
+		}
+		else if(colorChannelMode == G3CH_REFLECTION)
+		{
+			oColor.rgb = refl_color;
+		}
+#if GBLAYOUT == GBLAYOUT_01
+		else if(colorChannelMode == G3CH_MOTION)
+		{
+			oColor.rg = motion;
+		}
+#endif
+
+		if(alphaChannelMode == G1CH_DEPTH)
+		{
+			oColor.a = depth;
+		}
+		else if(alphaChannelMode == G1CH_SPECINT)
+		{
+			oColor.a = spec_int;
+		}
+		else if(alphaChannelMode == G1CH_SPECPOW)
+		{
+			oColor.a = spec_pow;
+		}
+		else if(alphaChannelMode == G3CH_DEPTH_SPECINTPOW)
+		{
+			oColor.rgb = float3(depth, spec_int, spec_pow);
+		}
+		
+		if(channel_filter == CH_RGB0 || channel_filter == CH_RGB7)
+		{
+			return oColor;
+		}
+		if(channel_filter == CH_R)
+		{
+			return float4(oColor.rrr, 0);
+		}
+		if(channel_filter == CH_G)
+		{
+			return float4(oColor.ggg, 0);
+		}
+		if(channel_filter == CH_B)
+		{
+			return float4(oColor.bbb, 0);
+		}
+		if(channel_filter == CH_RG)
+		{
+			return float4(oColor.rg, 0, 0);
+		}
+		if(channel_filter == CH_GB)
+		{
+			return float4(0, oColor.gb, 0);
+		}
+		if(channel_filter == CH_RB)
+		{
+			return float4(oColor.r, 0, oColor.b, 0);
+		}
+		if(channel_filter == CH_ALPHA)
+		{
+			return float4(oColor.aaa, 0);
+		}
+		
+		return float4(1,1,0,0);
+	}
+
+}
+//------------------------------------------------------------

@@ -1,0 +1,15 @@
+material DFR/Shadows/Caster
+{
+	technique
+	{
+		pass
+		{
+			vertex_program_ref DFR/Shadows/CasterVP
+			{
+			}
+			fragment_program_ref DFR/Shadows/CasterFP
+			{
+			}
+		}
+	}
+}
